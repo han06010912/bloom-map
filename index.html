@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>花農偏移座標產生器</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f3f5f8;color:#243349;font:16px/1.55 -apple-system,BlinkMacSystemFont,"Noto Sans TC",sans-serif}
+main{max-width:980px;margin:auto;padding:12px}.panel{background:#fff;border:1px solid #dfe5ed;border-radius:20px;padding:16px;margin-bottom:14px}
+h1{font-size:23px;margin:0 0 5px}.muted,.hint{color:#687990;font-size:14px}.hint{margin:10px 0}
+textarea{width:100%;border:1px solid #cbd6e5;border-radius:12px;padding:12px;font:15px/1.6 ui-monospace,monospace;resize:vertical;min-height:125px}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:10px}.between{justify-content:space-between}
+button,select{font:inherit;border:1px solid #cbd6e5;background:white;color:#243349;border-radius:11px;padding:10px 13px;cursor:pointer}
+button.primary{background:#2764db;border-color:#2764db;color:#fff}button:disabled{opacity:.4}button.danger{color:#c23c45}
+#map{height:430px;background:#eaf0e4;border-radius:14px;position:relative;overflow:hidden;touch-action:pan-x pan-y}
+#fallback{height:100%;display:flex;align-items:center;justify-content:center;text-align:center;padding:25px;color:#62768d;background:repeating-linear-gradient(45deg,#eaf1e7,#eaf1e7 30px,#e4ede2 30px,#e4ede2 60px)}
+#mapNotice{font-size:13px;color:#97611a;margin:8px 0}.count{border-radius:30px;background:#eaf2ff;color:#245ab5;padding:5px 12px}
+.legend{display:flex;gap:12px;flex-wrap:wrap;font-size:13px;color:#64738a;margin-top:10px}
+.dot{display:inline-block;width:12px;height:12px;border-radius:50%;vertical-align:middle}.red{background:#ef4444}.blue{background:#2867e7}
+.status{color:#215cb9;margin-top:10px;white-space:pre-wrap}.pointIcon{width:26px;height:26px;border-radius:50%;background:#2764db;border:3px solid #fff;color:#fff;box-shadow:0 1px 5px #5559;text-align:center;font:bold 11px/20px sans-serif}
+.endpoint{width:34px;height:34px;border-radius:50%;background:white;border:3px solid #26354c;text-align:center;font:bold 14px/28px sans-serif}
+#pointList{max-height:210px;overflow:auto;margin-top:8px}.pointRow{padding:7px 4px;border-bottom:1px solid #edf0f4;font:13px/1.5 ui-monospace,monospace}
+.pointRow button{padding:4px 8px;font-size:13px;margin-left:6px}
+@media(max-width:600px){#map{height:380px}h1{font-size:21px}.panel{padding:13px}}
+</style></head><body><main>
+<section class="panel"><h1>🌱 花農偏移座標產生器</h1>
+<div class="muted">每筆原始座標產生 1～2 個偏移點，固定在 55 公尺圓周上；自動雙點相鄰、間距 10～20 公尺；手動可額外新增點位，避開其他大花 40 公尺花圈</div>
+<p class="hint">可一次貼上多組「緯度,經度」，同一行或多行都可以，支援空白與中文逗號。</p>
+<textarea id="input" spellcheck="false" placeholder="-26.941057,-52.812493&#10;-26.940663,-52.813069"></textarea>
+<div class="row"><label>每筆產生 <select id="quantity"><option value="1">1 個偏移點</option><option value="2" selected>2 個偏移點</option></select></label>
+<button class="primary" id="generate">產生偏移點</button><button id="clear">清空全部</button></div>
+<div id="status" class="status" role="status">請貼上座標，再點「產生偏移點」。</div></section>
+<section class="panel"><div class="row between"><strong>地圖編輯</strong><span class="count" id="count">已產生 0 點</span></div>
+<div id="map" style="margin-top:12px"><div id="fallback">正在載入互動地圖…<br>即使地圖無法載入，仍可正常產生、編輯及複製座標。</div></div>
+<div id="mapNotice" role="status"></div>
+<div class="legend"><span><i class="dot red"></i> 原始點／40m 紅圈</span><span><i class="dot blue"></i> 偏移點／55m 藍圈</span><span>藍線：依貼上順序連線，雙點聯合規劃</span></div>
+<p id="selection" class="hint">請先貼上原始座標並按「產生偏移點」；有點位後即可新增、重新偏移或刪除。手動新增可超過每花 2 點，新增點在 40～55 公尺範圍內。</p>
+<div class="row"><button id="before" disabled>新增前一點</button><button id="after" disabled>新增後一點</button><button id="reset" disabled>重新偏移</button><button class="danger" id="delete" disabled>刪除選取點</button></div>
+<div id="pointList"></div></section>
+<section class="panel"><div class="row between"><strong>座標輸出</strong><label><input id="includeOriginal" type="checkbox"> 包含原始座標</label></div>
+<p class="hint">每行一組，逗號後無空白；依照自動最佳化的藍色路線順序輸出。</p>
+<textarea id="output" readonly spellcheck="false" placeholder="產生後顯示座標"></textarea>
+<div class="row"><button class="primary" id="copy">一鍵複製</button><button id="download">下載 TXT</button><button id="selectAll">選取全部座標</button></div></section></main>
+<script>
+(function(){
+"use strict";
+const $=id=>document.getElementById(id), R=6371008.8,rad=Math.PI/180;
+let originals=[],points=[],selected=null,serial=0,map=null,layer=null,leafletReady=false;
+function format(p){return p.map(v=>v.toFixed(7)).join(",")}
+function distance(a,b){let x=(b[0]-a[0])*rad,y=(b[1]-a[1])*rad,h=Math.sin(x/2)**2+Math.cos(a[0]*rad)*Math.cos(b[0]*rad)*Math.sin(y/2)**2;return 2*R*Math.asin(Math.min(1,Math.sqrt(h)))}
+function destination(o,d,angle){let p=o[0]*rad,l=o[1]*rad,v=d/R,lat=Math.asin(Math.sin(p)*Math.cos(v)+Math.cos(p)*Math.sin(v)*Math.cos(angle)),lon=l+Math.atan2(Math.sin(angle)*Math.sin(v)*Math.cos(p),Math.cos(v)-Math.sin(p)*Math.sin(lat));return [lat/rad,((lon/rad+540)%360)-180]}
+const TARGET=55, PAIR_MIN=10, PAIR_MAX=20, OTHER_MIN=10;
+function safeCandidate(source,candidate,excludeId=null){
+ if(!originals.every(center=>distance(center,candidate)>=40.01))return false;
+ return points.every(other=>{
+  if(other.id===excludeId)return true;
+  const d=distance(other.coords,candidate);
+  return other.source===source ? d>=PAIR_MIN-0.05 && d<=PAIR_MAX+0.05 : d>=OTHER_MIN;
+ });
+}
+function bearing(a,b){const p1=a[0]*rad,p2=b[0]*rad,dl=(b[1]-a[1])*rad;return Math.atan2(Math.sin(dl)*Math.cos(p2),Math.cos(p1)*Math.sin(p2)-Math.sin(p1)*Math.cos(p2)*Math.cos(dl))}
+function randomPoint(source,excludeId=null){
+ const o=originals[source],mate=points.find(p=>p.source===source&&p.id!==excludeId);
+ if(mate){
+  const base=bearing(o,mate.coords);
+  for(let i=0;i<600;i++){
+   const sep=PAIR_MIN+Math.random()*(PAIR_MAX-PAIR_MIN);
+   const angle=2*Math.asin(Math.min(1,sep/(2*TARGET)));
+   const candidate=destination(o,TARGET,base+(Math.random()<.5?-1:1)*angle);
+   if(safeCandidate(source,candidate,excludeId))return candidate;
+  }
+  return null;
+ }
+ for(let i=0;i<900;i++){
+  const candidate=destination(o,TARGET,Math.random()*Math.PI*2);
+  if(safeCandidate(source,candidate,excludeId))return candidate;
+ }
+ return null;
+}
+function localCost(index){
+ const p=points[index],prev=points[index-1],next=points[index+1];
+ return (prev?distance(prev.coords,p.coords):0)+(next?distance(p.coords,next.coords):0);
+}
+function refinePositions(){
+ // Keep each pair adjacent on the 55 m circumference, and preserve flower order.
+ for(let pass=0;pass<5;pass++){
+  for(let i=0;i<points.length;i++){
+   const p=points[i],old=p.coords;
+   let best=old,score=crossPairs().length*1000000+localCost(i);
+   for(let trial=0;trial<85;trial++){
+    const candidate=randomPoint(p.source,p.id);
+    if(!candidate)continue;
+    p.coords=candidate;
+    const cost=crossPairs().length*1000000+localCost(i);
+    if(cost<score-0.001){score=cost;best=candidate}
+   }
+   p.coords=best;
+  }
+ }
+}
+// Preserve input order. Adjust only offset positions to reduce crossings.
+function crossPairs(){
+ const result=[];
+ const xy=p=>[p[1]*Math.cos(p[0]*rad),p[0]];
+ const orient=(a,b,c)=>(b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]);
+ const intersect=(a,b,c,d)=>{a=xy(a);b=xy(b);c=xy(c);d=xy(d);const v=[orient(a,b,c),orient(a,b,d),orient(c,d,a),orient(c,d,b)];return v[0]*v[1]<-1e-16&&v[2]*v[3]<-1e-16};
+ for(let i=0;i<points.length-1;i++)for(let j=i+2;j<points.length-1;j++){
+  if(intersect(points[i].coords,points[i+1].coords,points[j].coords,points[j+1].coords))result.push([i,j]);
+ }
+ return result;
+}
+function avoidCrossings(){
+ // Never reorder points. Try alternative 55m bearings only for segments involved in crossings.
+ let best=crossPairs().length;
+ for(let pass=0;pass<8&&best>0;pass++){
+  let changed=false;
+  for(const [i,j] of crossPairs()){
+   for(const idx of [i+1,j,i,j+1]){
+    const p=points[idx],old=p.coords;
+    let winner=old,score=crossPairs().length*1000000+routeLength();
+    for(let trial=0;trial<45;trial++){
+     const candidate=randomPoint(p.source,p.id);if(!candidate)continue;
+     p.coords=candidate;
+     const count=crossPairs().length;
+     const cost=count*1000000+routeLength();
+     if(cost<score-0.001){score=cost;winner=candidate}
+    }
+    p.coords=winner;
+    if(winner!==old){changed=true;best=crossPairs().length}
+   }
+  }
+  if(!changed)break;
+ }
+ return crossPairs().length;
+}
+// Plan paired positions together, using the preceding and following flowers.
+// Original flower order and each flower's pair order are never changed.
+function optimizeRoute(){
+ // Fast bounded search: O(flowers * directions * flowers), no global rescoring.
+ const n=originals.length;
+ const groups=Array.from({length:n},()=>[]);
+ points.forEach(p=>groups[p.source].push(p));
+ const placed=[];
+ const invalid=[];
+ for(let i=0;i<n;i++){
+  const group=groups[i];if(!group.length)continue;
+  const center=originals[i];
+  const previous=placed.length?placed[placed.length-1]:null;
+  const next=originals[Math.min(i+1,n-1)];
+  const base=previous?bearing(previous,next):bearing(center,next);
+  let best=null,bestScore=Infinity;
+  for(let k=0;k<48;k++){
+   const angle=base+2*Math.PI*k/48;
+   for(const sep of (group.length===2?[12,16,19]:[0])){
+    const half=sep?Math.asin(sep/(2*TARGET)):0;
+    for(const sign of (group.length===2?[1,-1]:[1])){
+     const pair=group.length===2?
+      [destination(center,TARGET,angle-sign*half),destination(center,TARGET,angle+sign*half)]:
+      [destination(center,TARGET,angle)];
+     if(!pair.every(c=>originals.every((o,j)=>j===i||distance(o,c)>=40.05)))continue;
+     let score=previous?distance(previous,pair[0]):0;
+     score+=distance(pair[pair.length-1],next);
+     if(group.length===2)score+=distance(pair[0],pair[1]);
+     // Prefer smooth turns and discourage very close points from separate flowers.
+     if(placed.length>1){
+      const prior=placed[placed.length-2];
+      score+=Math.max(0,35-distance(prior,pair[0]))*4;
+     }
+     if(score<bestScore){bestScore=score;best=pair;}
+    }
+   }
+  }
+  if(!best){invalid.push(i+1);continue;}
+  group.forEach((p,j)=>{p.coords=best[Math.min(j,best.length-1)];placed.push(p.coords)});
+ }
+ if(invalid.length){
+  const rejected=new Set(invalid.map(i=>i-1));
+  points=points.filter(p=>!rejected.has(p.source));
+  $("status").textContent+="；第 "+invalid.join("、")+" 朵花找不到符合距離限制的位置，已略過。";
+ }
+ return 0;
+}
+function routeLength(){return points.slice(1).reduce((s,p,i)=>s+distance(points[i].coords,p.coords),0)}
+function parse(s){
+ const normalized=s.normalize("NFKC")
+  .replace(/[−–—﹣－‒‐‑⁃]/g,"-")
+  .replace(/[，、]/g,",")
+  .replace(/[\u00a0\u2007\u202f\u200b\ufeff]/g," ")
+  .replace(/[；]/g,";");
+ const re=/([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*,\s*([+-]?(?:\d+(?:\.\d*)?|\.\d+))/g;
+ const valid=[],errors=[];let match,last=0;
+ while((match=re.exec(normalized))!==null){
+   const gap=normalized.slice(last,match.index);
+   if(gap.trim()&&!/^[\s;,|]+$/.test(gap))errors.push("部分文字無法辨識");
+   const lat=Number(match[1]),lon=Number(match[2]);
+   if(Math.abs(lat)<=90&&Math.abs(lon)<=180)valid.push([lat,lon]);
+   else errors.push("超出範圍："+match[0]);
+   last=re.lastIndex;
+ }
+ const tail=normalized.slice(last);
+ if(tail.trim()&&!/^[\s;,|]+$/.test(tail))errors.push("最後一段格式錯誤");
+ return {valid,errors};
+}
+function updateOutput(){let a=$("includeOriginal").checked?originals.map(format):[];$("output").value=a.concat(points.map(p=>format(p.coords))).join("\n")}
+function choose(id){selected=id;render()}
+function markerIcon(s,kind){return L.divIcon({className:"",html:'<div class="'+kind+'">'+s+'</div>',iconSize:kind==="endpoint"?[34,34]:[26,26],iconAnchor:kind==="endpoint"?[17,17]:[13,13]})}
+function render(){
+$("count").textContent="已產生 "+points.length+" 點｜依貼上順序｜路線約 "+Math.round(routeLength())+"m｜交叉 "+crossPairs().length+" 處";
+if(points.length && !points.some(p=>p.id===selected))selected=points[0].id;
+let idx=points.findIndex(p=>p.id===selected),ok=idx>=0;
+["before","after","reset","delete"].forEach(k=>$(k).disabled=!ok);
+$("selection").textContent=ok?"已選第 "+(idx+1)+" 點｜距離原始點 "+distance(originals[points[idx].source],points[idx].coords).toFixed(1)+" 公尺（拖曳後可能偏離 55m、雙點間距或進入花圈，請留意）":"請先貼上原始座標並按「產生偏移點」；有點位後即可新增、重新偏移或刪除。手動新增可超過每花 2 點，新增點在 40～55 公尺範圍內。";
+updateOutput();
+let list=$("pointList");list.replaceChildren();
+points.forEach((p,i)=>{let div=document.createElement("div");div.className="pointRow";let label=document.createElement("span");label.textContent=(p.id===selected?"🔶 ":"🔵 ")+(i+1)+". "+format(p.coords)+" ";let btn=document.createElement("button");btn.textContent="選取";btn.onclick=()=>choose(p.id);div.append(label,btn);list.append(div)});
+if(!leafletReady)return;
+layer.clearLayers();
+originals.forEach((o,i)=>{L.circle(o,{radius:40,color:"#e44747",weight:2,dashArray:"7 7",fill:false,interactive:false}).addTo(layer);L.circle(o,{radius:55,color:"#2867e7",weight:2,dashArray:"8 7",fill:false,interactive:false}).addTo(layer);L.circleMarker(o,{radius:7,color:"#fff",weight:3,fillColor:"#ef4444",fillOpacity:1}).bindTooltip("原始點 "+(i+1)).addTo(layer)});
+if(points.length>1)L.polyline(points.map(p=>p.coords),{color:"#2867e7",weight:4}).addTo(layer);
+points.forEach((p,i)=>{let marker=L.marker(p.coords,{draggable:true,icon:markerIcon(String(i+1),"pointIcon")}).addTo(layer);marker.on("click",()=>choose(p.id));marker.on("dragend",()=>{let c=marker.getLatLng();p.coords=[c.lat,c.lng];selected=p.id;render();if(crossPairs().length)$("status").textContent="拖曳後偵測到 "+crossPairs().length+" 處交叉；可點重新偏移調整。"});if(p.id===selected)L.circleMarker(p.coords,{radius:18,color:"#f5a500",weight:3,fillOpacity:0,interactive:false}).addTo(layer)});
+if(points.length){L.marker(points[0].coords,{icon:markerIcon("起","endpoint"),interactive:false,zIndexOffset:1000}).addTo(layer);if(points.length>1)L.marker(points[points.length-1].coords,{icon:markerIcon("終","endpoint"),interactive:false,zIndexOffset:1000}).addTo(layer)}
+}
+function fit(){if(!leafletReady)return;let all=originals.concat(points.map(p=>p.coords));if(all.length)map.fitBounds(L.latLngBounds(all).pad(.3),{maxZoom:17})}
+$("generate").onclick=()=>{let {valid,errors}=parse($("input").value);if(!valid.length){$("status").textContent="沒有有效座標。請確認座標格式是「緯度,經度」。"+(errors.length?" 格式提醒："+errors.join("、"):"");return}
+originals=valid;points=[];selected=null;let failed=[];valid.forEach((o,source)=>{for(let i=0;i<Number($("quantity").value);i++){
+ const coords=randomPoint(source);if(coords)points.push({id:++serial,source,coords});else failed.push(source+1);
+ }});
+$("status").textContent="成功！讀取 "+valid.length+" 筆原始座標，產生 "+points.length+" 個偏移點。"+(errors.length?" 格式提醒："+errors.join("、"):"")+(failed.length?"；原始點 "+[...new Set(failed)].join("、")+" 周圍無法找到安全位置，已略過，不會強制放入花圈或產生不符合雙點間距的座標。":"");optimizeRoute();selected=points.length?points[0].id:null;render();fit();if(crossPairs().length)$("status").textContent+=" 仍有 "+crossPairs().length+" 處路線交叉，因保留原始順序而無法完全消除，請手動調整。"};
+$("clear").onclick=()=>{originals=[];points=[];selected=null;$("input").value="";$("status").textContent="已清空";render()};
+// 手動新增不受「同花只能有兩點」的自動生成限制。
+// 在 40～55 公尺環帶搜尋，依相鄰路線位置挑選候選點，保留全部既有點位。
+function manualCandidate(source,at){
+ const center=originals[source],prev=points[at-1]?.coords,next=points[at]?.coords;
+ let best=null,bestCost=Infinity;
+ for(let r=55;r>=40.5;r-=2.5){
+  for(let k=0;k<144;k++){
+   const c=destination(center,r,2*Math.PI*k/144);
+   if(originals.some((o,j)=>j!==source&&distance(o,c)<40.01))continue;
+   if(points.some(p=>distance(p.coords,c)<3))continue;
+   const travel=(prev?distance(prev,c):0)+(next?distance(c,next):0);
+   const spread=points.filter(p=>p.source===source).reduce((sum,p)=>sum+Math.max(0,10-distance(p.coords,c))*8,0);
+   const cost=travel+spread+(55-r)*0.3;
+   if(cost<bestCost){bestCost=cost;best=c}
+  }
+ }
+ return best;
+}
+function insert(where){
+ const idx=points.findIndex(p=>p.id===selected);
+ if(idx<0){$("status").textContent="請先產生座標並選取藍色點位。";return}
+ const source=points[idx].source,at=idx+(where==="after"?1:0);
+ const coords=manualCandidate(source,at);
+ if(!coords){$("status").textContent="這個原始點周圍沒有可新增的安全位置，請選其他點位。";return}
+ const p={id:++serial,source,coords,manual:true};
+ points.splice(at,0,p);selected=p.id;render();
+ $("status").textContent="已新增第 "+(at+1)+" 點，可直接拖曳；原有點位不會移動。";
+}
+$("before").onclick=()=>insert("before");$("after").onclick=()=>insert("after");
+$("reset").onclick=()=>{let p=points.find(p=>p.id===selected);if(p){let coords=randomPoint(p.source,p.id);if(coords){p.coords=coords;render()}else $("status").textContent="找不到安全偏移位置，已保留原點。"}};
+$("delete").onclick=()=>{let idx=points.findIndex(p=>p.id===selected);if(idx<0)return;points.splice(idx,1);selected=points.length?points[Math.min(idx,points.length-1)].id:null;render();$("status").textContent="已刪除點位，並自動選取相鄰點。"};
+$("includeOriginal").onchange=updateOutput;
+$("selectAll").onclick=()=>{$("output").focus();$("output").select();$("status").textContent="已選取全部輸出座標，可長按複製。"};
+$("copy").onclick=async()=>{let s=$("output").value;if(!s){$("status").textContent="目前沒有座標可複製";return}
+try{if(!navigator.clipboard||!navigator.clipboard.writeText)throw Error("clipboard unavailable");await navigator.clipboard.writeText(s);$("status").textContent="已複製 "+s.split("\n").length+" 筆座標！"}catch(e){$("output").focus();$("output").select();let ok=false;try{ok=document.execCommand("copy")}catch(_e){}$("status").textContent=ok?"已複製座標！":"已選取座標，請長按輸出框選擇「複製」。"}};
+$("download").onclick=()=>{let s=$("output").value;if(!s)return;let u=URL.createObjectURL(new Blob([s],{type:"text/plain;charset=utf-8"})),a=document.createElement("a");a.href=u;a.download="偏移座標.txt";a.click();setTimeout(()=>URL.revokeObjectURL(u),3000)};
+function initMap(){if(!window.L){$("mapNotice").textContent="地圖套件未載入；座標產生與複製仍可正常使用。建議使用 Safari 開啟正式網站網址。";$("fallback").innerHTML="地圖目前無法載入。<br>上方可產生座標，下方可選取、編輯與複製。";return}
+try{$("map").replaceChildren();map=L.map("map").setView([25.033964,121.564468],14);L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{maxZoom:19,attribution:"© OpenStreetMap contributors"}).addTo(map);layer=L.layerGroup().addTo(map);leafletReady=true;$("mapNotice").textContent="可拖曳藍色偏移點調整位置；拖曳後會保留手動位置；重新按「產生偏移點」可重新規劃。";render();fit();setTimeout(()=>map.invalidateSize(),250)}catch(e){$("mapNotice").textContent="地圖初始化失敗，但座標產生及複製功能不受影響。"}}
+render();
+let script=document.createElement("script");script.src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";script.onload=initMap;script.onerror=initMap;document.body.appendChild(script);
+setTimeout(()=>{if(!leafletReady&&!window.L)initMap()},8000);
+})();
+</script></body></html>
